@@ -1,26 +1,32 @@
-name: render-teste-cpu
+name: render-carro-completo
 
-# Teste de velocidade: renderiza só os quadros 1-12 da cena do carro
-# em CPU (runner Linux 2 núcleos, sem GPU). NÃO é o render completo.
-# v2: sem Docker (o pull da imagem falhou na v1) — baixa o Blender
-# 5.3.0 direto e roda o binário local.
+# Plano B: render COMPLETO do carro (2590 quadros) em CPU, SEM ÁUDIO,
+# dividido em 10 partes em paralelo (cada uma 259 quadros, ~3,1 h,
+# dentro do limite de 6 h por job). Cada parte vira um MP4 e é
+# publicada na branch segment-<n> + artefato.
+# v3: substitui o render-teste.yml (só quadros 1-12).
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   render:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      fail-fast: false
     steps:
       - uses: actions/checkout@v4
 
       - name: Decode blend
         run: |
           cat carro.blend.b64.part-* > carro.blend.b64
-          ls -la carro.blend.b64
           base64 -d carro.blend.b64 > carro.blend
-          ls -la carro.blend
           md5sum carro.blend
           echo "blend md5 esperado: f27365e832a671ec0aa9c6d49a9f5ef5"
 
@@ -29,43 +35,37 @@ jobs:
           curl -fL -o blender.tar.xz https://download.blender.org/release/Blender5.3/blender-5.3.0-linux-x64.tar.xz || curl -fL -o blender.tar.xz https://ftp.nluug.nl/pub/graphics/blender/release/Blender5.3/blender-5.3.0-linux-x64.tar.xz
           tar -xf blender.tar.xz
           ./blender-5.3.0-linux-x64/blender --version
-          nproc
 
-      - name: Check scene settings
-        continue-on-error: true
+      - name: Render chunk
         run: |
-          ./blender-5.3.0-linux-x64/blender -b carro.blend --python-expr "import bpy; s=bpy.context.scene; print('CENA: res', s.render.resolution_x, 'x', s.render.resolution_y, '| frames', s.frame_start, 'a', s.frame_end, '| samples', s.cycles.samples, '| denoise', s.cycles.use_denoising, '| device', s.cycles.device, '| objetos', len(bpy.data.objects))"
-
-      - name: Render frames 1-12 (CPU)
-        run: |
+          CHUNK=${{ matrix.chunk }}
+          START=$(( (CHUNK-1)*259 + 1 ))
+          END=$(( CHUNK*259 ))
+          echo "chunk $CHUNK: quadros $START a $END"
           mkdir -p frames
-          START=$(date +%s)
-          ./blender-5.3.0-linux-x64/blender -b carro.blend -o //frames/frame_ -s 1 -e 12 -a 2>&1 | tee render.log
-          END=$(date +%s)
-          echo "TOTAL_SECONDS=$((END-START))" | tee total.txt
-          echo "--- per-frame times from Blender ---"
-          grep -E "Saved:|Time:" render.log | tail -20
-          ls -la frames/
+          ./blender-5.3.0-linux-x64/blender -b carro.blend -o //frames/frame_ -s $START -e $END -a 2>&1 | tee render.log
+          echo "quadros renderizados:"
+          ls frames/ | wc -l
+          ffmpeg -y -framerate 24 -start_number $START -i frames/frame_%04d.png -c:v libx264 -pix_fmt yuv420p -crf 18 segment-$CHUNK.mp4
+          ls -la segment-$CHUNK.mp4
 
-      - name: Upload frames as artifact
+      - name: Upload segment as artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: frames-1-12
-          path: frames/
+          name: segment-${{ matrix.chunk }}
+          path: segment-${{ matrix.chunk }}.mp4
 
-      - name: Publish frames + log to output branch
-        if: always()
+      - name: Publish segment to branch
+        if: success()
         run: |
-          if [ ! -f render.log ]; then echo "sem render.log, nada para publicar"; exit 0; fi
-          mkdir -p /tmp/out
-          cp -r frames render.log total.txt /tmp/out/ 2>/dev/null || true
+          CHUNK=${{ matrix.chunk }}
+          START=$(( (CHUNK-1)*259 + 1 ))
+          END=$(( CHUNK*259 ))
           git config user.name "muse-render-bot"
           git config user.email "muse-render-bot@users.noreply.github.com"
-          git checkout --orphan output
+          git checkout --orphan segment-$CHUNK
           git rm -rf . >/dev/null 2>&1 || true
-          cp -r /tmp/out/* .
-          git add frames render.log total.txt
-          git diff --cached --quiet && echo "nada para commitar" && exit 0
-          git commit -m "frames 1-12 render cpu"
-          git push origin output --force
+          git add segment-$CHUNK.mp4
+          git commit -m "segmento $CHUNK quadros $START-$END"
+          git push origin segment-$CHUNK --force
