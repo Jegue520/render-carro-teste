@@ -1,0 +1,61 @@
+name: render-teste-cpu
+
+# Teste de velocidade: renderiza só os quadros 1-12 da cena do carro
+# em CPU (runner Linux 2 núcleos, sem GPU). NÃO é o render completo.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode blend
+        run: |
+          cat carro.blend.b64.part-* > carro.blend.b64
+          ls -la carro.blend.b64
+          base64 -d carro.blend.b64 > carro.blend
+          ls -la carro.blend
+          md5sum carro.blend
+          echo "blend md5 esperado: f27365e832a671ec0aa9c6d49a9f5ef5"
+
+      - name: Check scene settings
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work --entrypoint blender blendergrid/blender:5.3 \
+            -b carro.blend --python-expr "import bpy; s=bpy.context.scene; print('CENA: res', s.render.resolution_x, 'x', s.render.resolution_y, '| frames', s.frame_start, 'a', s.frame_end, '| samples', s.cycles.samples, '| denoise', s.cycles.use_denoising, '| device', s.cycles.device, '| objetos', len(bpy.data.objects))"
+
+      - name: Render frames 1-12 (CPU)
+        run: |
+          mkdir -p frames
+          START=$(date +%s)
+          docker run --rm -v "$PWD:/work" -w /work --entrypoint blender blendergrid/blender:5.3 \
+            -b carro.blend -o //frames/frame_ -s 1 -e 12 -a 2>&1 | tee render.log
+          END=$(date +%s)
+          echo "TOTAL_SECONDS=$((END-START))" | tee total.txt
+          echo "--- per-frame times from Blender ---"
+          grep -E "Saved:|Time:" render.log | tail -20
+          ls -la frames/
+
+      - name: Upload frames as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frames-1-12
+          path: frames/
+
+      - name: Publish frames + log to output branch
+        if: always()
+        run: |
+          mkdir -p /tmp/out
+          cp -r frames render.log total.txt /tmp/out/ 2>/dev/null || true
+          git config user.name "muse-render-bot"
+          git config user.email "muse-render-bot@users.noreply.github.com"
+          git checkout --orphan output
+          git rm -rf . >/dev/null 2>&1 || true
+          cp -r /tmp/out/* .
+          git add frames render.log total.txt
+          git commit -m "frames 1-12 render cpu"
+          git push origin output --force
