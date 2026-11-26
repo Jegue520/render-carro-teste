@@ -2,6 +2,8 @@ name: render-teste-cpu
 
 # Teste de velocidade: renderiza só os quadros 1-12 da cena do carro
 # em CPU (runner Linux 2 núcleos, sem GPU). NÃO é o render completo.
+# v2: sem Docker (o pull da imagem falhou na v1) — baixa o Blender
+# 5.3.0 direto e roda o binário local.
 on:
   push:
     branches: [main]
@@ -22,17 +24,23 @@ jobs:
           md5sum carro.blend
           echo "blend md5 esperado: f27365e832a671ec0aa9c6d49a9f5ef5"
 
-      - name: Check scene settings
+      - name: Install Blender 5.3.0
         run: |
-          docker run --rm -v "$PWD:/work" -w /work --entrypoint blender blendergrid/blender:5.3 \
-            -b carro.blend --python-expr "import bpy; s=bpy.context.scene; print('CENA: res', s.render.resolution_x, 'x', s.render.resolution_y, '| frames', s.frame_start, 'a', s.frame_end, '| samples', s.cycles.samples, '| denoise', s.cycles.use_denoising, '| device', s.cycles.device, '| objetos', len(bpy.data.objects))"
+          curl -fL -o blender.tar.xz https://download.blender.org/release/Blender5.3/blender-5.3.0-linux-x64.tar.xz || curl -fL -o blender.tar.xz https://ftp.nluug.nl/pub/graphics/blender/release/Blender5.3/blender-5.3.0-linux-x64.tar.xz
+          tar -xf blender.tar.xz
+          ./blender-5.3.0-linux-x64/blender --version
+          nproc
+
+      - name: Check scene settings
+        continue-on-error: true
+        run: |
+          ./blender-5.3.0-linux-x64/blender -b carro.blend --python-expr "import bpy; s=bpy.context.scene; print('CENA: res', s.render.resolution_x, 'x', s.render.resolution_y, '| frames', s.frame_start, 'a', s.frame_end, '| samples', s.cycles.samples, '| denoise', s.cycles.use_denoising, '| device', s.cycles.device, '| objetos', len(bpy.data.objects))"
 
       - name: Render frames 1-12 (CPU)
         run: |
           mkdir -p frames
           START=$(date +%s)
-          docker run --rm -v "$PWD:/work" -w /work --entrypoint blender blendergrid/blender:5.3 \
-            -b carro.blend -o //frames/frame_ -s 1 -e 12 -a 2>&1 | tee render.log
+          ./blender-5.3.0-linux-x64/blender -b carro.blend -o //frames/frame_ -s 1 -e 12 -a 2>&1 | tee render.log
           END=$(date +%s)
           echo "TOTAL_SECONDS=$((END-START))" | tee total.txt
           echo "--- per-frame times from Blender ---"
@@ -49,6 +57,7 @@ jobs:
       - name: Publish frames + log to output branch
         if: always()
         run: |
+          if [ ! -f render.log ]; then echo "sem render.log, nada para publicar"; exit 0; fi
           mkdir -p /tmp/out
           cp -r frames render.log total.txt /tmp/out/ 2>/dev/null || true
           git config user.name "muse-render-bot"
@@ -57,5 +66,6 @@ jobs:
           git rm -rf . >/dev/null 2>&1 || true
           cp -r /tmp/out/* .
           git add frames render.log total.txt
+          git diff --cached --quiet && echo "nada para commitar" && exit 0
           git commit -m "frames 1-12 render cpu"
           git push origin output --force
